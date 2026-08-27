@@ -19,7 +19,7 @@ concurrency:
 
 env:
   UPSTREAM_URL: https://gitlab.com/ReVanced/revanced-patches.git
-  UPSTREAM_BRANCH: main
+  UPSTREAM_BRANCH: dev
 
 jobs:
   sync-mirror:
@@ -79,7 +79,7 @@ jobs:
           ref: ${{ github.ref_name }}
 
       - name: Set up JDK
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           # Bump this if upstream's build.gradle.kts requires a newer JDK —
