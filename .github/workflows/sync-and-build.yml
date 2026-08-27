@@ -72,6 +72,9 @@ jobs:
     name: Build dev patches
     needs: sync-mirror
     runs-on: ubuntu-latest
+    env:
+      ORG_GRADLE_PROJECT_githubPackagesUsername: ${{ secrets.GH_PACKAGES_USERNAME }}
+      ORG_GRADLE_PROJECT_githubPackagesPassword: ${{ secrets.GH_PACKAGES_TOKEN }}
     steps:
       - name: Checkout synced repo
         uses: actions/checkout@v4
