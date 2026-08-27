@@ -1,0 +1,129 @@
+name: Sync GitLab mirror & build dev patches
+
+# Runs every 24h, and can also be triggered manually from the Actions tab.
+on:
+  schedule:
+    - cron: "0 3 * * *"   # 03:00 UTC daily — change to taste
+  workflow_dispatch: {}
+
+# Needed so the workflow can push commits back to this repo and create releases.
+# Also requires: repo Settings -> Actions -> General -> Workflow permissions ->
+# "Read and write permissions" (this is NOT on by default).
+permissions:
+  contents: write
+
+# Prevent overlapping runs from stepping on each other.
+concurrency:
+  group: sync-and-build
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_URL: https://gitlab.com/ReVanced/revanced-patches.git
+  UPSTREAM_BRANCH: main
+
+jobs:
+  sync-mirror:
+    name: Sync from GitLab mirror
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.diff.outputs.changed }}
+    steps:
+      - name: Checkout this repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch latest upstream source
+        run: |
+          rm -rf /tmp/upstream
+          git clone --depth 1 --branch "${UPSTREAM_BRANCH}" "${UPSTREAM_URL}" /tmp/upstream
+          UPSTREAM_SHA=$(git -C /tmp/upstream rev-parse HEAD)
+          echo "UPSTREAM_SHA=${UPSTREAM_SHA}" >> "$GITHUB_ENV"
+          echo "Upstream HEAD: ${UPSTREAM_SHA}"
+
+      - name: Mirror files into this repo (keeping our own automation intact)
+        run: |
+          rsync -a --delete \
+            --exclude '.git/' \
+            --exclude '.github/' \
+            --exclude 'AUTOMATION.md' \
+            /tmp/upstream/ ./
+
+      - name: Commit and push if upstream changed
+        id: diff
+        run: |
+          git add -A -- . ':!.github'
+          if git diff --cached --quiet; then
+            echo "No upstream changes."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            git commit -m "chore: sync upstream ${UPSTREAM_SHA:0:7} from GitLab mirror"
+            git push origin HEAD:${{ github.ref_name }}
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    name: Build dev patches
+    needs: sync-mirror
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout synced repo
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          # Bump this if upstream's build.gradle.kts requires a newer JDK —
+          # check the toolchain/jvmTarget in that file if the build fails.
+          java-version: "17"
+
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew
+
+      - name: Build with Gradle
+        run: ./gradlew build --no-daemon --stacktrace
+
+      - name: Locate build output
+        id: artifact
+        run: |
+          # revanced-patches typically produces a .rvp (or .jar) under build/libs/.
+          # Adjust this glob if upstream changes its output layout/task names.
+          FILE=$(find . -path '*/build/libs/*' \( -name '*.rvp' -o -name '*.jar' \) | head -n 1)
+          if [ -z "$FILE" ]; then
+            echo "Could not locate a build artifact — check build/libs contents." >&2
+            find . -path '*/build/libs/*' -print >&2
+            exit 1
+          fi
+          echo "path=$FILE" >> "$GITHUB_OUTPUT"
+          echo "name=$(basename "$FILE")" >> "$GITHUB_OUTPUT"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: revanced-patches-dev
+          path: ${{ steps.artifact.outputs.path }}
+          retention-days: 14
+
+      - name: Create dated dev release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: dev-${{ github.run_number }}-${{ github.sha }}
+          name: "Dev build ${{ github.run_number }} (${{ github.sha }})"
+          prerelease: true
+          make_latest: false
+          body: |
+            Automated dev build, mirrored from the ReVanced GitLab mirror
+            (https://gitlab.com/ReVanced/revanced-patches) while the GitHub
+            repo is down pending DMCA counter-notice resolution.
+
+            This is an unreviewed dev build — not an official ReVanced release.
+          files: ${{ steps.artifact.outputs.path }}
