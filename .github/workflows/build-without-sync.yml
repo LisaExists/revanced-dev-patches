@@ -1,0 +1,83 @@
+name: build dev patches
+
+# Runs every 24h, and can also be triggered manually from the Actions tab.
+on:
+  workflow_dispatch: {}
+
+# Needed so the workflow can push commits back to this repo and create releases.
+# Also requires: repo Settings -> Actions -> General -> Workflow permissions ->
+# "Read and write permissions" (this is NOT on by default).
+permissions:
+  contents: write
+
+# Prevent overlapping runs from stepping on each other.
+concurrency:
+  group: sync-and-build
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_URL: https://gitlab.com/ReVanced/revanced-patches.git
+  UPSTREAM_BRANCH: dev
+
+jobs:
+  build:
+    name: Build dev patches
+    runs-on: ubuntu-latest
+    env:
+      ORG_GRADLE_PROJECT_githubPackagesUsername: ${{ secrets.GH_PACKAGES_USERNAME }}
+      ORG_GRADLE_PROJECT_githubPackagesPassword: ${{ secrets.GH_PACKAGES_TOKEN }}
+    steps:
+      - name: Checkout synced repo
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+
+      - name: Set up JDK
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          # Bump this if upstream's build.gradle.kts requires a newer JDK —
+          # check the toolchain/jvmTarget in that file if the build fails.
+          java-version: "17"
+
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew
+
+      - name: Build with Gradle
+        run: ./gradlew build --no-daemon --stacktrace
+
+      - name: Locate build output
+        id: artifact
+        run: |
+          # revanced-patches typically produces a .rvp (or .jar) under build/libs/.
+          # Adjust this glob if upstream changes its output layout/task names.
+          FILE=$(find . -path '*/build/libs/*' \( -name '*.rvp' -o -name '*.jar' \) | head -n 1)
+          if [ -z "$FILE" ]; then
+            echo "Could not locate a build artifact — check build/libs contents." >&2
+            find . -path '*/build/libs/*' -print >&2
+            exit 1
+          fi
+          echo "path=$FILE" >> "$GITHUB_OUTPUT"
+          echo "name=$(basename "$FILE")" >> "$GITHUB_OUTPUT"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: revanced-patches-dev
+          path: ${{ steps.artifact.outputs.path }}
+          retention-days: 14
+
+      - name: Create dated dev release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: dev-${{ github.run_number }}-${{ github.sha }}
+          name: "Dev build ${{ github.run_number }} (${{ github.sha }})"
+          prerelease: true
+          make_latest: false
+          body: |
+            Automated dev build, mirrored from the ReVanced GitLab mirror
+            (https://gitlab.com/ReVanced/revanced-patches) while the GitHub
+            repo is down pending DMCA counter-notice resolution.
+
+            This is an unreviewed dev build — not an official ReVanced release.
+          files: ${{ steps.artifact.outputs.path }}
